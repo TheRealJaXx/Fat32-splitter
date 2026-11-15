@@ -1,6 +1,6 @@
 {
-  "name": "Split666",
-  "description": "PS3 and FAT32 file splitter and merger for Android using Storage Access Framework.",
+  "name": "PS3 Assist",
+  "description": "PS3 and FAT32 file splitter, merger, and USB OTG MBR/NTFS/FAT32 drive formatter for Android.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

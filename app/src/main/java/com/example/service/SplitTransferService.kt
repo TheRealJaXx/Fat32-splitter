@@ -19,6 +19,10 @@ import com.example.R
 import com.example.engine.SafFileHelper
 import com.example.engine.SplitNaming
 import com.example.engine.StreamSplitter
+import com.example.format.ActiveFormatJobConfig
+import com.example.format.DriveFormatCoordinator
+import com.example.format.FormatJobState
+import com.example.format.UsbScsiBlockDevice
 import com.example.model.QueueItemStatus
 import com.example.model.SmallFileAction
 import com.example.model.TransferProgressState
@@ -80,6 +84,20 @@ class SplitTransferService : Service() {
           indeterminate = true,
         )
         launchJoinJob(config)
+      }
+      ACTION_START_FORMAT -> {
+        val config = DriveFormatCoordinator.pendingFormatJob
+        if (config == null) {
+          stopSelf(startId)
+          return START_NOT_STICKY
+        }
+        startForegroundWithNotification(
+          title = "Formatting ${config.deviceTitle}",
+          detail = "Writing ${config.filesystem.title} structures...",
+          progressPercent = 0,
+          indeterminate = false,
+        )
+        launchFormatJob(config)
       }
     }
     return START_NOT_STICKY
@@ -443,6 +461,63 @@ class SplitTransferService : Service() {
       }
   }
 
+  private fun launchFormatJob(config: ActiveFormatJobConfig) {
+    activeJob?.cancel()
+    activeJob =
+      serviceScope.launch {
+        try {
+          DriveFormatCoordinator.setState(
+            FormatJobState.Formatting(
+              deviceTitle = config.deviceTitle,
+              filesystem = config.filesystem,
+              stageLabel = "Claiming USB Mass Storage interface...",
+              progress = 0.02f,
+            )
+          )
+
+          UsbScsiBlockDevice.open(applicationContext, config.usbDevice).use { blockDev ->
+            val completed =
+              DriveFormatCoordinator.formatBlockDevice(
+                device = blockDev,
+                deviceTitle = config.deviceTitle,
+                filesystem = config.filesystem,
+                volumeLabel = config.volumeLabel,
+                clusterSizeBytes = config.clusterSizeBytes,
+                onProgress = { stage, pct ->
+                  DriveFormatCoordinator.setState(
+                    FormatJobState.Formatting(
+                      deviceTitle = config.deviceTitle,
+                      filesystem = config.filesystem,
+                      stageLabel = stage,
+                      progress = pct,
+                    )
+                  )
+                  updateProgressNotification(
+                    title = "Formatting ${config.deviceTitle}",
+                    detail = stage,
+                    progressPercent = (pct * 100f).toInt().coerceIn(0, 100),
+                  )
+                },
+              )
+            DriveFormatCoordinator.setState(completed)
+            postCompletionNotification(
+              title = "Drive formatted (${config.filesystem.title})",
+              detail = "${config.deviceTitle} is ready. Unplug and replug to mount.",
+            )
+          }
+        } catch (t: Throwable) {
+          DriveFormatCoordinator.setState(
+            FormatJobState.Failed(
+              t.message ?: "USB formatting failed. Check OTG connection and retry."
+            )
+          )
+        } finally {
+          DriveFormatCoordinator.pendingFormatJob = null
+          stopForegroundAndSelf()
+        }
+      }
+  }
+
   private fun startForegroundWithNotification(
     title: String,
     detail: String,
@@ -551,6 +626,7 @@ class SplitTransferService : Service() {
     private const val NOTIFICATION_ID = 6661
     const val ACTION_START_SPLIT = "com.example.action.START_SPLIT"
     const val ACTION_START_JOIN = "com.example.action.START_JOIN"
+    const val ACTION_START_FORMAT = "com.example.action.START_FORMAT"
     const val ACTION_CANCEL = "com.example.action.CANCEL_TRANSFER"
 
     fun startSplit(context: Context, config: ActiveSplitJobConfig) {
@@ -566,6 +642,16 @@ class SplitTransferService : Service() {
     fun startJoin(context: Context, config: ActiveJoinJobConfig) {
       TransferCoordinator.pendingJoinJob = config
       val intent = Intent(context, SplitTransferService::class.java).apply { action = ACTION_START_JOIN }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        context.startForegroundService(intent)
+      } else {
+        context.startService(intent)
+      }
+    }
+
+    fun startFormat(context: Context, config: ActiveFormatJobConfig) {
+      DriveFormatCoordinator.pendingFormatJob = config
+      val intent = Intent(context, SplitTransferService::class.java).apply { action = ACTION_START_FORMAT }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         context.startForegroundService(intent)
       } else {

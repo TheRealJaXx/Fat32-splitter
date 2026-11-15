@@ -1,7 +1,13 @@
 package com.example
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -25,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -40,6 +47,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -54,8 +62,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.AppTab
 import com.example.model.ThemeMode
+import com.example.ui.FormatViewModel
 import com.example.ui.MainViewModel
 import com.example.ui.components.CustomChunkSizeDialog
+import com.example.ui.screens.FormatScreen
 import com.example.ui.screens.JoinScreen
 import com.example.ui.screens.SpecsScreen
 import com.example.ui.screens.SplitScreen
@@ -66,15 +76,19 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     setContent {
-      Split666App()
+      Ps3AssistApp()
     }
   }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun Split666App(viewModel: MainViewModel = viewModel()) {
+fun Ps3AssistApp(
+  viewModel: MainViewModel = viewModel(),
+  formatViewModel: FormatViewModel = viewModel(),
+) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  val formatUiState by formatViewModel.uiState.collectAsStateWithLifecycle()
   val context = LocalContext.current
   val snackbarHostState = remember { SnackbarHostState() }
 
@@ -88,6 +102,49 @@ fun Split666App(viewModel: MainViewModel = viewModel()) {
   LaunchedEffect(Unit) {
     viewModel.snackbarEvents.collect { msg ->
       snackbarHostState.showSnackbar(msg)
+    }
+  }
+
+  LaunchedEffect(Unit) {
+    formatViewModel.events.collect { msg ->
+      snackbarHostState.showSnackbar(msg)
+    }
+  }
+
+  // Register USB attach / detach / permission BroadcastReceiver cleanly
+  DisposableEffect(context) {
+    val receiver =
+      object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+          when (intent?.action) {
+            FormatViewModel.ACTION_USB_PERMISSION -> {
+              val device =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                  intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                } else {
+                  @Suppress("DEPRECATION")
+                  intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                }
+              val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+              formatViewModel.onUsbPermissionResult(device, granted)
+            }
+            UsbManager.ACTION_USB_DEVICE_ATTACHED,
+            UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+              formatViewModel.refreshDevices()
+            }
+          }
+        }
+      }
+
+    val filter =
+      IntentFilter().apply {
+        addAction(FormatViewModel.ACTION_USB_PERMISSION)
+        addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+        addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+      }
+    ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+    onDispose {
+      runCatching { context.unregisterReceiver(receiver) }
     }
   }
 
@@ -160,7 +217,7 @@ fun Split666App(viewModel: MainViewModel = viewModel()) {
                   shape = MaterialTheme.shapes.extraSmall,
                 ) {
                   Text(
-                    text = "FAT32",
+                    text = if (uiState.activeTab == AppTab.FORMAT) "MBR/NTFS" else "FAT32",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer,
                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -200,6 +257,15 @@ fun Split666App(viewModel: MainViewModel = viewModel()) {
                 modifier = Modifier.testTag("nav_tab_join"),
               )
               NavigationBarItem(
+                selected = uiState.activeTab == AppTab.FORMAT,
+                onClick = { viewModel.selectTab(AppTab.FORMAT) },
+                icon = {
+                  Icon(Icons.Rounded.Usb, contentDescription = "Format USB drive")
+                },
+                label = { Text(stringResource(R.string.tab_format)) },
+                modifier = Modifier.testTag("nav_tab_format"),
+              )
+              NavigationBarItem(
                 selected = uiState.activeTab == AppTab.SPECS,
                 onClick = { viewModel.selectTab(AppTab.SPECS) },
                 icon = {
@@ -235,6 +301,15 @@ fun Split666App(viewModel: MainViewModel = viewModel()) {
                 },
                 label = { Text(stringResource(R.string.tab_join)) },
                 modifier = Modifier.testTag("rail_tab_join"),
+              )
+              NavigationRailItem(
+                selected = uiState.activeTab == AppTab.FORMAT,
+                onClick = { viewModel.selectTab(AppTab.FORMAT) },
+                icon = {
+                  Icon(Icons.Rounded.Usb, contentDescription = "Format USB drive")
+                },
+                label = { Text(stringResource(R.string.tab_format)) },
+                modifier = Modifier.testTag("rail_tab_format"),
               )
               NavigationRailItem(
                 selected = uiState.activeTab == AppTab.SPECS,
@@ -284,6 +359,26 @@ fun Split666App(viewModel: MainViewModel = viewModel()) {
                   },
                   onCancelTransfer = viewModel::cancelTransfer,
                   onDismissProgress = viewModel::dismissProgressState,
+                )
+
+              AppTab.FORMAT ->
+                FormatScreen(
+                  uiState = formatUiState,
+                  onRefreshDevices = formatViewModel::refreshDevices,
+                  onSelectDrive = formatViewModel::selectDrive,
+                  onRequestPermission = formatViewModel::requestUsbPermission,
+                  onProbeDrive = formatViewModel::probeDrive,
+                  onSelectFilesystem = formatViewModel::selectFilesystem,
+                  onVolumeLabelChange = formatViewModel::updateVolumeLabel,
+                  onSelectClusterSize = formatViewModel::selectClusterSize,
+                  onRequestFormat = formatViewModel::openConfirmDialog,
+                  onUpdateConfirmTypedText = formatViewModel::updateConfirmTypedText,
+                  onConfirmFormat = {
+                    requestNotificationsIfNeeded()
+                    formatViewModel.executeConfirmedFormat()
+                  },
+                  onDismissConfirmDialog = formatViewModel::dismissConfirmDialog,
+                  onDismissJobState = formatViewModel::dismissJobState,
                 )
 
               AppTab.SPECS ->

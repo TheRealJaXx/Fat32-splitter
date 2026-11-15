@@ -27,20 +27,25 @@ class ExampleRobolectricTest {
   @get:Rule val composeTestRule = createAndroidComposeRule<MainActivity>()
 
   @Test
-  fun appNameMatchesSplit666() {
+  fun appNameMatchesPs3Assist() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
-    assertEquals("Split666", appName)
+    assertEquals("PS3 Assist", appName)
   }
 
   @Test
-  fun navigationTabsSwitchBetweenSplitMergeAndSpecs() {
+  fun navigationTabsSwitchBetweenSplitMergeFormatAndSpecs() {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("pick_files_button").assertIsDisplayed()
 
     composeTestRule.onNodeWithTag("nav_tab_join").performClick()
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithText("Merge .666xx & .001 Parts").assertIsDisplayed()
+
+    composeTestRule.onNodeWithTag("nav_tab_format").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("MBR Drive Formatter (NTFS / FAT32)").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("usb_empty_state").assertIsDisplayed()
 
     composeTestRule.onNodeWithTag("nav_tab_specs").performClick()
     composeTestRule.waitForIdle()

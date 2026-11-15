@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Split666"
+rootProject.name = "PS3 Assist"
 
 include(":app")

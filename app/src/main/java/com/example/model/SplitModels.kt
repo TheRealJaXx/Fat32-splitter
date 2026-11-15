@@ -5,6 +5,7 @@ import android.net.Uri
 enum class AppTab {
   SPLIT,
   JOIN,
+  FORMAT,
   SPECS,
 }
 
