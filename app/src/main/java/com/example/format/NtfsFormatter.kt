@@ -1,12 +1,11 @@
 package com.example.format
 
-import kotlin.math.ceil
 import kotlin.random.Random
 
 /**
  * Pure Kotlin NTFS 3.1 Quick Formatter for MBR partition layouts.
  * Generates spec-compliant $Boot (+ backup), $MFT, $MFTMirr, $LogFile, $Volume,
- * $AttrDef, Root INDX ($I30), $Bitmap, $BadClus, $Secure, $UpCase, and $Extend.
+ * $AttrDef, Root INDX ($I30), $Bitmap, $BadClus, $Secure ($SDS/$SII/$SDH), $UpCase, and $Extend.
  */
 object NtfsFormatter {
 
@@ -15,6 +14,8 @@ object NtfsFormatter {
   private const val INDEX_BLOCK_SIZE = 4096
   private const val MFT_SYSTEM_RECORDS = 16
   private const val MFT_TOTAL_INIT_RECORDS = 24
+  private const val DEFAULT_SECURITY_ID = 256
+  private const val SDS_MIRROR_OFFSET = 0x40000 // 256 KiB standard NTFS $SDS mirror offset
 
   // Standard NTFS Windows FileTime epoch offset (1601-01-01 to 1970-01-01 in 100ns ticks)
   private const val EPOCH_DIFF_100NS = 116_444_736_000_000_000L
@@ -46,11 +47,11 @@ object NtfsFormatter {
     val serial64 = Random.nextLong()
 
     // Cluster allocations (all contiguous runs for clean sequential writes)
-    // Cluster 0..bootClusters-1: $Boot (at least 8192 bytes)
     val bootClusters = ((8192 + clusterBytes - 1) / clusterBytes).toLong()
     val mftCluster = maxOf(4L, bootClusters)
-    val mftBytes = MFT_TOTAL_INIT_RECORDS * MFT_RECORD_SIZE // 24 KiB
-    val mftClusters = ((mftBytes + clusterBytes - 1) / clusterBytes).toLong()
+    val mftDataSize = (MFT_TOTAL_INIT_RECORDS * MFT_RECORD_SIZE).toLong() // 24 KiB
+    val mftClusters = ((mftDataSize + clusterBytes - 1) / clusterBytes).toLong()
+    val mftAllocatedSize = mftClusters * clusterBytes
 
     val logFileBytes = 64 * 1024 // 64 KiB cleanly initialized log
     val logFileClusters = ((logFileBytes + clusterBytes - 1) / clusterBytes).toLong()
@@ -63,9 +64,14 @@ object NtfsFormatter {
     val rootIndexClusters = ((INDEX_BLOCK_SIZE + clusterBytes - 1) / clusterBytes).toLong()
     val rootIndexCluster = attrDefCluster + attrDefClusters
 
+    val sdsPayload = buildDefaultSdsStream()
+    val sdsBytes = sdsPayload.size.toLong()
+    val sdsClusters = ((sdsBytes + clusterBytes - 1) / clusterBytes).toLong()
+    val sdsCluster = rootIndexCluster + rootIndexClusters
+
     val bitmapBytes = ((totalClusters + 7L) / 8L).toInt()
     val bitmapClusters = ((bitmapBytes + clusterBytes - 1) / clusterBytes).toLong()
-    val bitmapCluster = rootIndexCluster + rootIndexClusters
+    val bitmapCluster = sdsCluster + sdsClusters
 
     val upCaseBytes = 65536 * 2 // 128 KiB
     val upCaseClusters = ((upCaseBytes + clusterBytes - 1) / clusterBytes).toLong()
@@ -90,14 +96,14 @@ object NtfsFormatter {
         serial64 = serial64,
       )
 
-    // Write $Boot (8192 bytes padded to cluster boundary) & backup boot sector at partition end
-    val bootArea = ByteArray((bootClusters * clusterBytes).toInt())
-    bootSector.copyInto(bootArea, 0)
-    device.writeSectors(partStart, bootArea)
+    // Write $Boot + clean gap before $MFT (clusters 0..mftCluster-1) and backup boot sector at partition end
+    val preMftArea = ByteArray((mftCluster * clusterBytes).toInt())
+    bootSector.copyInto(preMftArea, 0)
+    writeChunked(device, partStart, preMftArea, sectorSize)
     device.writeSectors(partStart + partSectors - 1L, bootSector)
 
     // Build $Root INDX block (4096 bytes) listing system metadata files
-    onProgress("Building NTFS Root Directory & Metadata...", 0.35f)
+    onProgress("Building NTFS Root Directory & Security Store...", 0.35f)
     val rootEntries =
       listOf(
         IndexFileMeta(4L, 1, "\$AttrDef", nowFileTime, attrDefBytes.toLong(), attrDefClusters * clusterBytes, 0x06),
@@ -106,7 +112,7 @@ object NtfsFormatter {
         IndexFileMeta(7L, 1, "\$Boot", nowFileTime, 8192L, bootClusters * clusterBytes, 0x06),
         IndexFileMeta(11L, 1, "\$Extend", nowFileTime, 0L, 0L, 0x10000006),
         IndexFileMeta(2L, 1, "\$LogFile", nowFileTime, logFileBytes.toLong(), logFileClusters * clusterBytes, 0x06),
-        IndexFileMeta(0L, 1, "\$MFT", nowFileTime, mftBytes.toLong(), mftClusters * clusterBytes, 0x06),
+        IndexFileMeta(0L, 1, "\$MFT", nowFileTime, mftDataSize, mftAllocatedSize, 0x06),
         IndexFileMeta(1L, 1, "\$MFTMirr", nowFileTime, 4096L, mftMirrClusters * clusterBytes, 0x06),
         IndexFileMeta(9L, 1, "\$Secure", nowFileTime, 0L, 0L, 0x06),
         IndexFileMeta(10L, 1, "\$UpCase", nowFileTime, upCaseBytes.toLong(), upCaseClusters * clusterBytes, 0x06),
@@ -116,7 +122,7 @@ object NtfsFormatter {
     val rootIndxBlock = buildRootIndxBlock(rootEntries)
 
     // Build 24 MFT records (0..15 initialized, 16..23 free placeholders)
-    val mftArea = ByteArray((mftClusters * clusterBytes).toInt())
+    val mftArea = ByteArray(mftAllocatedSize.toInt())
     val mftBitmap = ByteArray(8)
     mftBitmap[0] = 0xFF.toByte() // Records 0..7 in use
     mftBitmap[1] = 0xFF.toByte() // Records 8..15 in use
@@ -126,7 +132,8 @@ object NtfsFormatter {
         nowFileTime = nowFileTime,
         mftCluster = mftCluster,
         mftClusters = mftClusters,
-        mftDataSize = mftBytes.toLong(),
+        mftDataSize = mftDataSize,
+        mftAllocatedSize = mftAllocatedSize,
         mftBitmap = mftBitmap,
       )
     val mftRec1 =
@@ -193,7 +200,15 @@ object NtfsFormatter {
         allocatedSize = bootClusters * clusterBytes,
       )
     val mftRec8 = buildBadClusRecord(nowFileTime)
-    val mftRec9 = buildSecureRecord(nowFileTime)
+    val mftRec9 =
+      buildSecureRecord(
+        nowFileTime = nowFileTime,
+        sdsCluster = sdsCluster,
+        sdsClusters = sdsClusters,
+        sdsDataSize = sdsBytes,
+        sdsAllocatedSize = sdsClusters * clusterBytes,
+        clusterBytes = clusterBytes,
+      )
     val mftRec10 =
       buildSimpleNonResidentRecord(
         recordNum = 10,
@@ -205,9 +220,23 @@ object NtfsFormatter {
         dataSize = upCaseBytes.toLong(),
         allocatedSize = upCaseClusters * clusterBytes,
       )
-    val mftRec11 = buildExtendRecord(nowFileTime)
+    val mftRec11 = buildExtendRecord(nowFileTime, clusterBytes)
 
-    val records = listOf(mftRec0, mftRec1, mftRec2, mftRec3, mftRec4, mftRec5, mftRec6, mftRec7, mftRec8, mftRec9, mftRec10, mftRec11)
+    val records =
+      listOf(
+        mftRec0,
+        mftRec1,
+        mftRec2,
+        mftRec3,
+        mftRec4,
+        mftRec5,
+        mftRec6,
+        mftRec7,
+        mftRec8,
+        mftRec9,
+        mftRec10,
+        mftRec11,
+      )
     records.forEachIndexed { idx, rec -> rec.copyInto(mftArea, idx * MFT_RECORD_SIZE) }
     for (idx in 12 until MFT_SYSTEM_RECORDS) {
       buildEmptyRecord(idx, inUse = true).copyInto(mftArea, idx * MFT_RECORD_SIZE)
@@ -217,23 +246,27 @@ object NtfsFormatter {
     }
 
     onProgress("Writing \$MFT & \$MFTMirr...", 0.48f)
-    device.writeSectors(partStart + mftCluster * sectorsPerCluster, mftArea)
+    writeChunked(device, partStart + mftCluster * sectorsPerCluster, mftArea, sectorSize)
 
     val mftMirrorArea = ByteArray((mftMirrClusters * clusterBytes).toInt())
     mftArea.copyInto(mftMirrorArea, 0, 0, minOf(4 * MFT_RECORD_SIZE, mftMirrorArea.size))
-    device.writeSectors(partStart + mftMirrCluster * sectorsPerCluster, mftMirrorArea)
+    writeChunked(device, partStart + mftMirrCluster * sectorsPerCluster, mftMirrorArea, sectorSize)
 
-    onProgress("Writing \$LogFile, \$AttrDef & Root Index...", 0.62f)
+    onProgress("Writing \$LogFile, \$AttrDef & \$Secure...", 0.62f)
     val logArea = ByteArray((logFileClusters * clusterBytes).toInt()) { 0xFF.toByte() }
-    device.writeSectors(partStart + logFileCluster * sectorsPerCluster, logArea)
+    writeChunked(device, partStart + logFileCluster * sectorsPerCluster, logArea, sectorSize)
 
     val attrDefArea = ByteArray((attrDefClusters * clusterBytes).toInt())
     buildAttrDefTable().copyInto(attrDefArea, 0)
-    device.writeSectors(partStart + attrDefCluster * sectorsPerCluster, attrDefArea)
+    writeChunked(device, partStart + attrDefCluster * sectorsPerCluster, attrDefArea, sectorSize)
 
     val rootIdxArea = ByteArray((rootIndexClusters * clusterBytes).toInt())
     rootIndxBlock.copyInto(rootIdxArea, 0)
-    device.writeSectors(partStart + rootIndexCluster * sectorsPerCluster, rootIdxArea)
+    writeChunked(device, partStart + rootIndexCluster * sectorsPerCluster, rootIdxArea, sectorSize)
+
+    val sdsArea = ByteArray((sdsClusters * clusterBytes).toInt())
+    sdsPayload.copyInto(sdsArea, 0)
+    writeChunked(device, partStart + sdsCluster * sectorsPerCluster, sdsArea, sectorSize)
 
     onProgress("Writing Cluster \$Bitmap...", 0.78f)
     val bitmapArea = ByteArray((bitmapClusters * clusterBytes).toInt())
@@ -242,6 +275,7 @@ object NtfsFormatter {
     markClustersAllocated(bitmapArea, logFileCluster, logFileClusters)
     markClustersAllocated(bitmapArea, attrDefCluster, attrDefClusters)
     markClustersAllocated(bitmapArea, rootIndexCluster, rootIndexClusters)
+    markClustersAllocated(bitmapArea, sdsCluster, sdsClusters)
     markClustersAllocated(bitmapArea, bitmapCluster, bitmapClusters)
     markClustersAllocated(bitmapArea, upCaseCluster, upCaseClusters)
     markClustersAllocated(bitmapArea, mftMirrCluster, mftMirrClusters)
@@ -303,12 +337,13 @@ object NtfsFormatter {
     LittleEndian.putU16(boot, 0x18, 63)
     LittleEndian.putU16(boot, 0x1A, 255)
     LittleEndian.putU32(boot, 0x1C, hiddenSectors)
-    LittleEndian.putU32(boot, 0x24, 0x80008000L)
+    // Bytes [80, 00, 80, 00] in file = 0x00800080 little-endian u32
+    LittleEndian.putU32(boot, 0x24, 0x00800080L)
     LittleEndian.putU64(boot, 0x28, ntfsTotalSectors)
     LittleEndian.putU64(boot, 0x30, mftCluster)
     LittleEndian.putU64(boot, 0x38, mftMirrCluster)
     boot[0x40] = (-10).toByte() // 2^10 = 1024 bytes per MFT record
-    boot[0x44] = if (clusterBytes >= INDEX_BLOCK_SIZE) 1 else (-12).toByte()
+    boot[0x44] = indexBlockSizeField(clusterBytes)
     LittleEndian.putU64(boot, 0x48, serial64)
     boot[510] = 0x55
     boot[511] = 0xAA.toByte()
@@ -435,7 +470,7 @@ object NtfsFormatter {
     LittleEndian.putU64(body, 16, nowFileTime) // MFT Modified
     LittleEndian.putU64(body, 24, nowFileTime) // Accessed
     LittleEndian.putU32(body, 32, dosAttrs.toLong())
-    LittleEndian.putU32(body, 52, 256L) // Default SecurityId
+    LittleEndian.putU32(body, 52, DEFAULT_SECURITY_ID.toLong())
     return body
   }
 
@@ -470,6 +505,7 @@ object NtfsFormatter {
     mftCluster: Long,
     mftClusters: Long,
     mftDataSize: Long,
+    mftAllocatedSize: Long,
     mftBitmap: ByteArray,
   ): ByteArray {
     val rec = initMftHeader(0, seqNum = 1, flags = 0x0001)
@@ -481,7 +517,7 @@ object NtfsFormatter {
         off,
         0x30,
         1,
-        body = fileNameBody(5L, 5, "\$MFT", nowFileTime, mftDataSize, mftDataSize, 0x06),
+        body = fileNameBody(5L, 5, "\$MFT", nowFileTime, mftDataSize, mftAllocatedSize, 0x06),
       )
     off =
       appendNonResidentAttr(
@@ -490,7 +526,7 @@ object NtfsFormatter {
         0x80,
         2,
         runs = listOf(mftCluster to mftClusters),
-        allocatedSize = mftDataSize,
+        allocatedSize = mftAllocatedSize,
         dataSize = mftDataSize,
       )
     off = appendResidentAttr(rec, off, 0xB0, 3, body = mftBitmap)
@@ -568,7 +604,83 @@ object NtfsFormatter {
     return finalizeMftRecord(rec, off, nextAttrId = 3)
   }
 
-  private fun buildSecureRecord(nowFileTime: Long): ByteArray {
+  private fun buildDefaultSecurityDescriptor(): ByteArray {
+    // Self-relative Security Descriptor granting Everyone (S-1-1-0) FILE_ALL_ACCESS
+    val sd = ByteArray(72)
+    sd[0] = 1 // Revision
+    sd[1] = 0
+    LittleEndian.putU16(sd, 2, 0x8004) // SE_SELF_RELATIVE | SE_DACL_PRESENT
+    LittleEndian.putU32(sd, 4, 20L) // Owner offset
+    LittleEndian.putU32(sd, 8, 32L) // Group offset
+    LittleEndian.putU32(sd, 12, 0L) // SACL offset
+    LittleEndian.putU32(sd, 16, 44L) // DACL offset
+
+    val everyoneSid = byteArrayOf(1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0) // S-1-1-0
+    everyoneSid.copyInto(sd, 20)
+    everyoneSid.copyInto(sd, 32)
+
+    // DACL (28 bytes at offset 44)
+    sd[44] = 2 // ACL_REVISION
+    LittleEndian.putU16(sd, 46, 28) // AclSize
+    LittleEndian.putU16(sd, 48, 1) // AceCount
+    // ACCESS_ALLOWED_ACE (20 bytes at offset 52)
+    sd[52] = 0x00 // ACCESS_ALLOWED_ACE_TYPE
+    sd[53] = 0x03 // OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+    LittleEndian.putU16(sd, 54, 20) // AceSize
+    LittleEndian.putU32(sd, 56, 0x001F01FFL) // FILE_ALL_ACCESS
+    everyoneSid.copyInto(sd, 60)
+    return sd
+  }
+
+  private fun computeSecurityHash(sd: ByteArray): Long {
+    var hash = 0L
+    for (i in 0 until sd.size step 4) {
+      val w = LittleEndian.getU32(sd, i)
+      val rotated = ((hash shl 3) or (hash ushr 29)) and 0xFFFFFFFFL
+      hash = (rotated + w) and 0xFFFFFFFFL
+    }
+    return hash
+  }
+
+  private fun buildDefaultSdsEntryHeader(sd: ByteArray, hash: Long, offsetInSds: Long): ByteArray {
+    val hdr = ByteArray(20)
+    LittleEndian.putU32(hdr, 0, hash)
+    LittleEndian.putU32(hdr, 4, DEFAULT_SECURITY_ID.toLong())
+    LittleEndian.putU64(hdr, 8, offsetInSds)
+    LittleEndian.putU32(hdr, 16, (20 + sd.size).toLong())
+    return hdr
+  }
+
+  private fun buildDefaultSdsStream(): ByteArray {
+    val sd = buildDefaultSecurityDescriptor()
+    val hash = computeSecurityHash(sd)
+    val entryLen = 20 + sd.size // 92 bytes
+    val alignedEntryLen = (entryLen + 15) and 15.inv() // 96 bytes (16-byte aligned)
+    val stream = ByteArray(SDS_MIRROR_OFFSET + alignedEntryLen)
+
+    val hdrPrimary = buildDefaultSdsEntryHeader(sd, hash, 0L)
+    hdrPrimary.copyInto(stream, 0)
+    sd.copyInto(stream, 20)
+
+    val hdrMirror = buildDefaultSdsEntryHeader(sd, hash, SDS_MIRROR_OFFSET.toLong())
+    hdrMirror.copyInto(stream, SDS_MIRROR_OFFSET)
+    sd.copyInto(stream, SDS_MIRROR_OFFSET + 20)
+
+    return stream
+  }
+
+  private fun buildSecureRecord(
+    nowFileTime: Long,
+    sdsCluster: Long,
+    sdsClusters: Long,
+    sdsDataSize: Long,
+    sdsAllocatedSize: Long,
+    clusterBytes: Int,
+  ): ByteArray {
+    val sd = buildDefaultSecurityDescriptor()
+    val hash = computeSecurityHash(sd)
+    val sdsHeader = buildDefaultSdsEntryHeader(sd, hash, 0L)
+
     val rec = initMftHeader(9, seqNum = 1, flags = 0x0001)
     var off = 0x38
     off = appendResidentAttr(rec, off, 0x10, 0, body = standardInfoBody(nowFileTime, 0x06))
@@ -580,11 +692,105 @@ object NtfsFormatter {
         1,
         body = fileNameBody(5L, 5, "\$Secure", nowFileTime, 0L, 0L, 0x06),
       )
-    off = appendResidentAttr(rec, off, 0x80, 2, nameUtf16 = "\$SDS", body = ByteArray(0))
-    return finalizeMftRecord(rec, off, nextAttrId = 3)
+    off =
+      appendNonResidentAttr(
+        rec,
+        off,
+        0x80,
+        2,
+        nameUtf16 = "\$SDS",
+        runs = listOf(sdsCluster to sdsClusters),
+        allocatedSize = sdsAllocatedSize,
+        dataSize = sdsDataSize,
+      )
+    // $SDH index root (collation 0x12 = COLLATION_NTOFS_SECURITY_HASH); sorted before $SII by name
+    off =
+      appendResidentAttr(
+        rec,
+        off,
+        0x90,
+        3,
+        nameUtf16 = "\$SDH",
+        body = buildSdhIndexRootBody(clusterBytes, hash, sdsHeader),
+      )
+    // $SII index root (collation 0x10 = COLLATION_NTOFS_ULONG)
+    off =
+      appendResidentAttr(
+        rec,
+        off,
+        0x90,
+        4,
+        nameUtf16 = "\$SII",
+        body = buildSiiIndexRootBody(clusterBytes, sdsHeader),
+      )
+    return finalizeMftRecord(rec, off, nextAttrId = 5)
   }
 
-  private fun buildExtendRecord(nowFileTime: Long): ByteArray {
+  private fun buildSiiIndexRootBody(clusterBytes: Int, sdsHeader: ByteArray): ByteArray {
+    // 16 (IndexRoot) + 16 (IndexHeader) + 40 (Entry: 16 hdr + 4 key + 20 data) + 16 (End) = 88 bytes
+    val entryLen = 40
+    val totalEntriesSize = 16 + entryLen + 16
+    val body = ByteArray(16 + totalEntriesSize)
+    LittleEndian.putU32(body, 0, 0L) // Indexed attr type (view)
+    LittleEndian.putU32(body, 4, 0x10L) // COLLATION_NTOFS_ULONG
+    LittleEndian.putU32(body, 8, INDEX_BLOCK_SIZE.toLong())
+    body[12] = indexBlockSizeField(clusterBytes)
+
+    // IndexHeader at offset 16
+    LittleEndian.putU32(body, 16, 16L)
+    LittleEndian.putU32(body, 20, totalEntriesSize.toLong())
+    LittleEndian.putU32(body, 24, totalEntriesSize.toLong())
+    body[28] = 0x00 // Small index
+
+    // Entry at offset 32
+    val e = 32
+    LittleEndian.putU16(body, e + 0, 20) // Data offset (16 + 4)
+    LittleEndian.putU16(body, e + 2, 20) // Data length
+    LittleEndian.putU16(body, e + 8, entryLen)
+    LittleEndian.putU16(body, e + 10, 4) // Key length (u32 SecurityId)
+    LittleEndian.putU16(body, e + 12, 0)
+    LittleEndian.putU32(body, e + 16, DEFAULT_SECURITY_ID.toLong())
+    sdsHeader.copyInto(body, e + 20)
+
+    // End entry at offset 72
+    val end = e + entryLen
+    LittleEndian.putU16(body, end + 8, 16)
+    LittleEndian.putU16(body, end + 12, 0x02)
+    return body
+  }
+
+  private fun buildSdhIndexRootBody(clusterBytes: Int, hash: Long, sdsHeader: ByteArray): ByteArray {
+    // 16 (IndexRoot) + 16 (IndexHeader) + 48 (Entry: 16 hdr + 8 key + 20 data + 4 pad) + 16 (End) = 96 bytes
+    val entryLen = 48
+    val totalEntriesSize = 16 + entryLen + 16
+    val body = ByteArray(16 + totalEntriesSize)
+    LittleEndian.putU32(body, 0, 0L)
+    LittleEndian.putU32(body, 4, 0x12L) // COLLATION_NTOFS_SECURITY_HASH
+    LittleEndian.putU32(body, 8, INDEX_BLOCK_SIZE.toLong())
+    body[12] = indexBlockSizeField(clusterBytes)
+
+    LittleEndian.putU32(body, 16, 16L)
+    LittleEndian.putU32(body, 20, totalEntriesSize.toLong())
+    LittleEndian.putU32(body, 24, totalEntriesSize.toLong())
+    body[28] = 0x00
+
+    val e = 32
+    LittleEndian.putU16(body, e + 0, 24) // Data offset (16 + 8)
+    LittleEndian.putU16(body, e + 2, 20) // Data length
+    LittleEndian.putU16(body, e + 8, entryLen)
+    LittleEndian.putU16(body, e + 10, 8) // Key length (hash + securityId)
+    LittleEndian.putU16(body, e + 12, 0)
+    LittleEndian.putU32(body, e + 16, hash)
+    LittleEndian.putU32(body, e + 20, DEFAULT_SECURITY_ID.toLong())
+    sdsHeader.copyInto(body, e + 24)
+
+    val end = e + entryLen
+    LittleEndian.putU16(body, end + 8, 16)
+    LittleEndian.putU16(body, end + 12, 0x02)
+    return body
+  }
+
+  private fun buildExtendRecord(nowFileTime: Long, clusterBytes: Int): ByteArray {
     val rec = initMftHeader(11, seqNum = 1, flags = 0x0003)
     var off = 0x38
     off = appendResidentAttr(rec, off, 0x10, 0, body = standardInfoBody(nowFileTime, 0x06))
@@ -596,7 +802,7 @@ object NtfsFormatter {
         1,
         body = fileNameBody(5L, 5, "\$Extend", nowFileTime, 0L, 0L, 0x10000006),
       )
-    off = appendResidentAttr(rec, off, 0x90, 2, nameUtf16 = "\$I30", body = buildEmptyIndexRootBody(4096))
+    off = appendResidentAttr(rec, off, 0x90, 2, nameUtf16 = "\$I30", body = buildEmptyIndexRootBody(clusterBytes))
     return finalizeMftRecord(rec, off, nextAttrId = 3)
   }
 
@@ -631,7 +837,8 @@ object NtfsFormatter {
         allocatedSize = indexAllocClusters * clusterBytes,
         dataSize = INDEX_BLOCK_SIZE.toLong(),
       )
-    off = appendResidentAttr(rec, off, 0xB0, 4, nameUtf16 = "\$I30", body = byteArrayOf(0x01))
+    val rootBitmap = ByteArray(8).apply { this[0] = 0x01 }
+    off = appendResidentAttr(rec, off, 0xB0, 4, nameUtf16 = "\$I30", body = rootBitmap)
     return finalizeMftRecord(rec, off, nextAttrId = 5)
   }
 
@@ -640,13 +847,11 @@ object NtfsFormatter {
     LittleEndian.putU32(body, 0, 0x30L) // Indexed attr type = $FILE_NAME
     LittleEndian.putU32(body, 4, 1L) // Collation rule = FILENAME
     LittleEndian.putU32(body, 8, INDEX_BLOCK_SIZE.toLong())
-    body[12] = if (clusterBytes >= INDEX_BLOCK_SIZE) 1 else (-12).toByte()
-    // Index Header starts at offset 16
-    LittleEndian.putU32(body, 16, 16L) // Entries offset relative to header
-    LittleEndian.putU32(body, 20, 32L) // Total size of index entries
-    LittleEndian.putU32(body, 24, 32L) // Allocated size
-    body[28] = 0x00 // Small index (no $INDEX_ALLOCATION)
-    // End-of-index entry at offset 32 (16 bytes)
+    body[12] = indexBlockSizeField(clusterBytes)
+    LittleEndian.putU32(body, 16, 16L)
+    LittleEndian.putU32(body, 20, 32L)
+    LittleEndian.putU32(body, 24, 32L)
+    body[28] = 0x00
     LittleEndian.putU16(body, 32 + 8, 16)
     LittleEndian.putU16(body, 32 + 12, 0x02) // INDEX_ENTRY_END
     return body
@@ -657,18 +862,19 @@ object NtfsFormatter {
     LittleEndian.putU32(body, 0, 0x30L)
     LittleEndian.putU32(body, 4, 1L)
     LittleEndian.putU32(body, 8, INDEX_BLOCK_SIZE.toLong())
-    body[12] = if (clusterBytes >= INDEX_BLOCK_SIZE) 1 else (-12).toByte()
-    // Index Header at offset 16
+    body[12] = indexBlockSizeField(clusterBytes)
     LittleEndian.putU32(body, 16, 16L)
-    LittleEndian.putU32(body, 20, 40L) // Entries total size
+    LittleEndian.putU32(body, 20, 40L)
     LittleEndian.putU32(body, 24, 40L)
-    body[28] = 0x01 // Has sub-nodes ($INDEX_ALLOCATION)
-    // Single end entry pointing to child VCN 0 at offset 32 (24 bytes)
-    LittleEndian.putU16(body, 32 + 8, 24) // Entry length
+    body[28] = 0x01
+    LittleEndian.putU16(body, 32 + 8, 24)
     LittleEndian.putU16(body, 32 + 12, 0x03) // INDEX_ENTRY_NODE | INDEX_ENTRY_END
-    LittleEndian.putU64(body, 32 + 16, 0L) // Child VCN 0
+    LittleEndian.putU64(body, 32 + 16, 0L)
     return body
   }
+
+  private fun indexBlockSizeField(clusterBytes: Int): Byte =
+    if (clusterBytes <= INDEX_BLOCK_SIZE) (INDEX_BLOCK_SIZE / clusterBytes).toByte() else (-12).toByte()
 
   private data class IndexFileMeta(
     val mftRecordNum: Long,
@@ -687,9 +893,8 @@ object NtfsFormatter {
     val usaCount = 1 + (INDEX_BLOCK_SIZE / NTFS_USA_STRIDE) // 9
     LittleEndian.putU16(block, 0x04, usaOffset)
     LittleEndian.putU16(block, 0x06, usaCount)
-    LittleEndian.putU64(block, 0x10, 0L) // This block VCN = 0
+    LittleEndian.putU64(block, 0x10, 0L)
 
-    // Index header starts at 0x18; entries start after USA padded to 8-byte boundary
     val headerStart = 0x18
     val entriesStart = align8(usaOffset + usaCount * 2) // 0x40 (64)
     val entriesRelOffset = entriesStart - headerStart // 40
@@ -711,12 +916,11 @@ object NtfsFormatter {
       LittleEndian.putU64(block, cursor, mftRef)
       LittleEndian.putU16(block, cursor + 8, entryLen)
       LittleEndian.putU16(block, cursor + 10, fnBody.size)
-      LittleEndian.putU16(block, cursor + 12, 0) // Leaf entry
+      LittleEndian.putU16(block, cursor + 12, 0)
       fnBody.copyInto(block, cursor + 16)
       cursor += entryLen
     }
 
-    // End entry (16 bytes)
     LittleEndian.putU16(block, cursor + 8, 16)
     LittleEndian.putU16(block, cursor + 12, 0x02) // INDEX_ENTRY_END
     cursor += 16
@@ -725,7 +929,7 @@ object NtfsFormatter {
     LittleEndian.putU32(block, headerStart + 0, entriesRelOffset.toLong())
     LittleEndian.putU32(block, headerStart + 4, totalEntriesSize.toLong())
     LittleEndian.putU32(block, headerStart + 8, (INDEX_BLOCK_SIZE - headerStart).toLong())
-    block[headerStart + 12] = 0x00 // Leaf INDX block
+    block[headerStart + 12] = 0x00
 
     applyUsaFixup(block, usaOffset = usaOffset, usaCount = usaCount)
     return block
@@ -785,7 +989,7 @@ object NtfsFormatter {
       nameBytes.copyInto(table, base, 0, minOf(nameBytes.size, 128))
       LittleEndian.putU32(table, base + 128, entry.type.toLong())
       LittleEndian.putU32(table, base + 132, 0L)
-      LittleEndian.putU32(table, base + 136, 1L) // Collation
+      LittleEndian.putU32(table, base + 136, 1L)
       LittleEndian.putU32(table, base + 140, entry.flags.toLong())
       LittleEndian.putU64(table, base + 144, entry.minSize)
       LittleEndian.putU64(table, base + 152, entry.maxSize)
@@ -819,7 +1023,6 @@ object NtfsFormatter {
       buf.add((v and 0xFFL).toByte())
       v = v ushr 8
     }
-    // Keep positive sign bit clear per NTFS mapping-pair spec
     if ((buf.last().toInt() and 0x80) != 0) {
       buf.add(0x00)
     }

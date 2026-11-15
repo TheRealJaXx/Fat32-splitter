@@ -337,7 +337,11 @@ fun FormatScreen(
               )
               Text(
                 text =
-                  "Formatting writes a fresh MBR partition table, wipes GPT headers, and erases all files on the selected USB drive. Replug the drive after formatting so Android remounts it.",
+                  if (uiState.filesystem == TargetFilesystem.MBR_NTFS) {
+                    "Formatting erases all data and writes MBR + NTFS. Note: Most Android phones mount NTFS read-only in the system Files app (for PS3/PC use); choose MBR + FAT32 if you need to copy split files directly from Android."
+                  } else {
+                    "Formatting writes a fresh MBR + FAT32 partition, wipes GPT headers, and erases all files. Replug the USB drive after formatting so Android mounts it read-write."
+                  },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface,
               )
@@ -605,7 +609,11 @@ private fun FormatJobStatusCard(
             )
             Text(
               text =
-                "Label '${jobState.volumeLabel}' • LBA ${jobState.partitionStartLba} • ${jobState.clusterSizeBytes / 1024} KiB clusters (${SplitNaming.formatDuration(jobState.elapsedMillis)}). Unplug and replug USB drive to mount.",
+                if (jobState.filesystem == TargetFilesystem.MBR_NTFS) {
+                  "Label '${jobState.volumeLabel}' verified • ${jobState.clusterSizeBytes / 1024} KiB clusters (${SplitNaming.formatDuration(jobState.elapsedMillis)}). Unplug & replug drive. Note: Android's Files app often mounts NTFS read-only even when formatted cleanly; PS3 (IrisMAN/prepISO) & PCs have full access."
+                } else {
+                  "Label '${jobState.volumeLabel}' verified • ${jobState.clusterSizeBytes / 1024} KiB clusters (${SplitNaming.formatDuration(jobState.elapsedMillis)}). Unplug and replug USB drive so Android mounts it read-write."
+                },
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

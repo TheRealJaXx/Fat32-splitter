@@ -95,6 +95,8 @@ class DriveFormatterTest {
     assertEquals("NTFS    ", String(ntfsBoot, 3, 8, Charsets.US_ASCII))
     assertEquals(512, LittleEndian.getU16(ntfsBoot, 0x0B))
     assertEquals(8, ntfsBoot[0x0D].toInt() and 0xFF)
+    assertEquals(0x00800080L, LittleEndian.getU32(ntfsBoot, 0x24))
+    assertEquals(1, ntfsBoot[0x44].toInt())
     assertEquals(completed.partitionSectors - 1L, LittleEndian.getU64(ntfsBoot, 0x28))
     assertArrayEquals(ntfsBoot, ntfsBackupBoot)
 
@@ -108,6 +110,61 @@ class DriveFormatterTest {
     assertEquals("FILE", String(mftHead, 1024, 4, Charsets.US_ASCII))
     assertEquals(1, LittleEndian.getU16(mftHead, 510)) // USA fixup applied at end of sector 0
     assertArrayEquals(mftHead, mftMirr)
+
+    // Verify MFT record 9 ($Secure) has $SDH (0x12) before $SII (0x10) and non-resident $SDS
+    val mftAll = dev.readSectors(completed.partitionStartLba + mftCluster * spc, 48)
+    val secureRec = undoUsaFixup(mftAll.copyOfRange(9 * 1024, 10 * 1024))
+    assertEquals("FILE", String(secureRec, 0, 4, Charsets.US_ASCII))
+    val attrs = parseMftAttributes(secureRec)
+    val indexRoots = attrs.filter { it.type == 0x90 }
+    assertEquals(listOf("\$SDH", "\$SII"), indexRoots.map { it.name })
+    assertEquals(0x12L, LittleEndian.getU32(secureRec, indexRoots[0].bodyOffset + 4))
+    assertEquals(0x10L, LittleEndian.getU32(secureRec, indexRoots[1].bodyOffset + 4))
+
+    // Verify $Bitmap marks boot, MFT, and $SDS clusters allocated
+    val rec6 = undoUsaFixup(mftAll.copyOfRange(6 * 1024, 7 * 1024))
+    val bitmapAttr = parseMftAttributes(rec6).first { it.type == 0x80 }
+    val bitmapFirstCluster = decodeFirstRunStartCluster(rec6, bitmapAttr.runOffset)
+    val bitmapSector =
+      dev.readSectors(completed.partitionStartLba + bitmapFirstCluster * spc, 1)
+    assertTrue((bitmapSector[0].toInt() and 0x01) != 0) // Cluster 0 ($Boot) allocated
+
+    val sdsAttr = attrs.first { it.type == 0x80 && it.name == "\$SDS" }
+    val sdsStartCluster = decodeFirstRunStartCluster(secureRec, sdsAttr.runOffset)
+    val sdsByteIdx = (sdsStartCluster / 8L).toInt()
+    val sdsBitMask = 1 shl (sdsStartCluster % 8L).toInt()
+    assertTrue((bitmapSector[sdsByteIdx].toInt() and sdsBitMask) != 0)
+
+    // Verify $SDS primary (0x0) and mirror (0x40000) security descriptor entries
+    val sdsPrimarySec =
+      dev.readSectors(completed.partitionStartLba + sdsStartCluster * spc, 1)
+    val sdsMirrorSec =
+      dev.readSectors(
+        completed.partitionStartLba + sdsStartCluster * spc + (0x40000L / 512L),
+        1,
+      )
+    assertEquals(256L, LittleEndian.getU32(sdsPrimarySec, 4))
+    assertEquals(0L, LittleEndian.getU64(sdsPrimarySec, 8))
+    assertEquals(256L, LittleEndian.getU32(sdsMirrorSec, 4))
+    assertEquals(0x40000L, LittleEndian.getU64(sdsMirrorSec, 8))
+    assertEquals(LittleEndian.getU32(sdsPrimarySec, 0), LittleEndian.getU32(sdsMirrorSec, 0))
+  }
+
+  @Test
+  fun formatNtfsWith64KClustersEncodes4KIndexBlockSize() = runTest {
+    val dev = SparseMemoryBlockDevice(sectorSizeBytes = 512, totalSectors = 2_097_152L) // 1 GiB
+    val completed =
+      DriveFormatCoordinator.formatBlockDevice(
+        device = dev,
+        deviceTitle = "Test USB 1GB",
+        filesystem = TargetFilesystem.MBR_NTFS,
+        volumeLabel = "PS3BIG",
+        clusterSizeBytes = 65536,
+        onProgress = { _, _ -> },
+      )
+    val ntfsBoot = dev.readSectors(completed.partitionStartLba, 1)
+    assertEquals(128, ntfsBoot[0x0D].toInt() and 0xFF) // 65536 / 512
+    assertEquals(-12, ntfsBoot[0x44].toInt()) // 2^12 = 4096-byte INDX blocks
   }
 
   @Test
@@ -143,6 +200,11 @@ class DriveFormatterTest {
     assertEquals(0x0FFFFFF8L, LittleEndian.getU32(fat1Sec0, 0))
     assertEquals(0x0FFFFFFFL, LittleEndian.getU32(fat1Sec0, 4))
     assertEquals(0x0FFFFFFFL, LittleEndian.getU32(fat1Sec0, 8))
+
+    val fatSize = LittleEndian.getU32(vbr, 36)
+    val rootDirSec0 = dev.readSectors(completed.partitionStartLba + 32L + 2L * fatSize, 1)
+    assertEquals(0x08, rootDirSec0[11].toInt() and 0xFF)
+    assertEquals(0x5821, LittleEndian.getU16(rootDirSec0, 24))
   }
 
   @Test
@@ -150,5 +212,54 @@ class DriveFormatterTest {
     val runs = NtfsFormatter.encodeDataRuns(listOf(4L to 3L, 1024L to 32L))
     assertTrue(runs.isNotEmpty())
     assertEquals(0x00, runs.last().toInt() and 0xFF)
+  }
+
+  private data class ParsedAttr(
+    val type: Int,
+    val name: String,
+    val bodyOffset: Int,
+    val runOffset: Int,
+  )
+
+  private fun undoUsaFixup(record: ByteArray): ByteArray {
+    val usaOff = LittleEndian.getU16(record, 0x04)
+    val usaCount = LittleEndian.getU16(record, 0x06)
+    for (i in 1 until usaCount) {
+      val endOff = i * 512 - 2
+      record[endOff] = record[usaOff + i * 2]
+      record[endOff + 1] = record[usaOff + i * 2 + 1]
+    }
+    return record
+  }
+
+  private fun parseMftAttributes(record: ByteArray): List<ParsedAttr> {
+    val list = mutableListOf<ParsedAttr>()
+    var off = LittleEndian.getU16(record, 0x14)
+    while (off + 4 <= record.size) {
+      val type = LittleEndian.getU32(record, off).toInt()
+      if (type == -1) break
+      val len = LittleEndian.getU32(record, off + 4).toInt()
+      val nonRes = record[off + 8].toInt() and 0xFF
+      val nameLen = record[off + 9].toInt() and 0xFF
+      val nameOff = LittleEndian.getU16(record, off + 10)
+      val name =
+        if (nameLen > 0) String(record, off + nameOff, nameLen * 2, Charsets.UTF_16LE) else ""
+      val bodyOffset = if (nonRes == 0) off + LittleEndian.getU16(record, off + 20) else 0
+      val runOffset = if (nonRes != 0) off + LittleEndian.getU16(record, off + 32) else 0
+      list.add(ParsedAttr(type = type, name = name, bodyOffset = bodyOffset, runOffset = runOffset))
+      off += len
+    }
+    return list
+  }
+
+  private fun decodeFirstRunStartCluster(record: ByteArray, runOff: Int): Long {
+    val hdr = record[runOff].toInt() and 0xFF
+    val lenBytes = hdr and 0x0F
+    val offBytes = (hdr ushr 4) and 0x0F
+    var cluster = 0L
+    for (i in 0 until offBytes) {
+      cluster = cluster or ((record[runOff + 1 + lenBytes + i].toLong() and 0xFFL) shl (i * 8))
+    }
+    return cluster
   }
 }

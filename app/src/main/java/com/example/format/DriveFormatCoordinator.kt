@@ -72,6 +72,22 @@ object DriveFormatCoordinator {
       }
     }
 
+    onProgress("Verifying MBR & boot sector...", 0.99f)
+    val verifyMbr = device.readSectors(0L, 1)
+    check(MbrWriter.inspectPartitionScheme(verifyMbr, null) == PartitionScheme.MBR) {
+      "Post-format verification failed: MBR signature not persisted on drive"
+    }
+    val verifyVbr = device.readSectors(layout.partitionStartLba, 1)
+    val expectedOem =
+      when (filesystem) {
+        TargetFilesystem.MBR_NTFS -> "NTFS    "
+        TargetFilesystem.MBR_FAT32 -> "MSDOS5.0"
+      }
+    val actualOem = String(verifyVbr, 3, 8, Charsets.US_ASCII)
+    check(actualOem == expectedOem) {
+      "Post-format verification failed: Expected $expectedOem boot record, found '$actualOem'"
+    }
+
     val elapsed = ((System.nanoTime() / 1_000_000L) - startMs).coerceAtLeast(1L)
     return FormatJobState.Completed(
       deviceTitle = deviceTitle,

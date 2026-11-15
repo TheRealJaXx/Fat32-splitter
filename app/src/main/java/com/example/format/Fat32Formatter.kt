@@ -144,9 +144,12 @@ object Fat32Formatter {
     onProgress("Writing FAT32 Root Directory...", 0.92f)
     val rootDirStart = fat1Start + NUM_FATS * fatSize
     val rootDirCluster = ByteArray(spc * sectorSize)
-    // Volume label directory entry (attribute 0x08)
+    // Volume label directory entry (attribute 0x08) with valid DOS date (2024-01-01 = 0x5821)
     LittleEndian.asciiBytes(cleanLabel, 11).copyInto(rootDirCluster, 0)
     rootDirCluster[11] = 0x08
+    LittleEndian.putU16(rootDirCluster, 16, 0x5821) // DIR_CrtDate
+    LittleEndian.putU16(rootDirCluster, 18, 0x5821) // DIR_LstAccDate
+    LittleEndian.putU16(rootDirCluster, 24, 0x5821) // DIR_WrtDate
     device.writeSectors(rootDirStart, rootDirCluster)
 
     onProgress("Flushing USB cache...", 0.98f)
