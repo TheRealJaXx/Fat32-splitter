@@ -21,12 +21,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallSplit
+import androidx.compose.material.icons.automirrored.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Storage
@@ -128,7 +128,7 @@ fun SplitScreen(
                 verticalAlignment = Alignment.CenterVertically,
               ) {
                 Icon(
-                  imageVector = Icons.Rounded.NoteAdd,
+                  imageVector = Icons.AutoMirrored.Rounded.NoteAdd,
                   contentDescription = "Pick files",
                   tint = MaterialTheme.colorScheme.primary,
                 )

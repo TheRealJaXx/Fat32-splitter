@@ -18,12 +18,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.CallMerge
+import androidx.compose.material.icons.automirrored.rounded.CallMerge
+import androidx.compose.material.icons.automirrored.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -137,7 +137,7 @@ fun JoinScreen(
                 verticalAlignment = Alignment.CenterVertically,
               ) {
                 Icon(
-                  imageVector = Icons.Rounded.NoteAdd,
+                  imageVector = Icons.AutoMirrored.Rounded.NoteAdd,
                   contentDescription = "Select part files",
                   tint = MaterialTheme.colorScheme.primary,
                 )
@@ -253,7 +253,7 @@ fun JoinScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
               ) {
                 Icon(
-                  imageVector = Icons.Rounded.CallMerge,
+                  imageVector = Icons.AutoMirrored.Rounded.CallMerge,
                   contentDescription = null,
                   tint = MaterialTheme.colorScheme.onSurfaceVariant,
                   modifier = Modifier.size(36.dp),
@@ -293,7 +293,7 @@ fun JoinScreen(
               modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("start_join_button"),
               shape = MaterialTheme.shapes.medium,
             ) {
-              Icon(imageVector = Icons.Rounded.CallMerge, contentDescription = null)
+              Icon(imageVector = Icons.AutoMirrored.Rounded.CallMerge, contentDescription = null)
               Spacer(modifier = Modifier.width(8.dp))
               Text(
                 text =

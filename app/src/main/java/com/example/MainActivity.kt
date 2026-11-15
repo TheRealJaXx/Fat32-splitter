@@ -22,8 +22,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.automirrored.rounded.CallSplit
-import androidx.compose.material.icons.rounded.CallMerge
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -194,7 +194,7 @@ fun Split666App(viewModel: MainViewModel = viewModel()) {
                 selected = uiState.activeTab == AppTab.JOIN,
                 onClick = { viewModel.selectTab(AppTab.JOIN) },
                 icon = {
-                  Icon(Icons.Rounded.CallMerge, contentDescription = "Merge split parts")
+                  Icon(Icons.AutoMirrored.Rounded.CallMerge, contentDescription = "Merge split parts")
                 },
                 label = { Text(stringResource(R.string.tab_join)) },
                 modifier = Modifier.testTag("nav_tab_join"),
@@ -231,7 +231,7 @@ fun Split666App(viewModel: MainViewModel = viewModel()) {
                 selected = uiState.activeTab == AppTab.JOIN,
                 onClick = { viewModel.selectTab(AppTab.JOIN) },
                 icon = {
-                  Icon(Icons.Rounded.CallMerge, contentDescription = "Merge split parts")
+                  Icon(Icons.AutoMirrored.Rounded.CallMerge, contentDescription = "Merge split parts")
                 },
                 label = { Text(stringResource(R.string.tab_join)) },
                 modifier = Modifier.testTag("rail_tab_join"),
