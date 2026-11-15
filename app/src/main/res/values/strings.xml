@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Split666</string>
+    <string name="app_tagline">FAT32 &amp; Console File Splitter</string>
+    <string name="tab_split">Split</string>
+    <string name="tab_join">Merge</string>
+    <string name="tab_tools">Specs</string>
+    <string name="action_pick_files">Pick Files</string>
+    <string name="action_scan_folder">Scan Folder</string>
+    <string name="action_pick_output">Choose Destination</string>
+    <string name="action_start_split">Split Queue</string>
+    <string name="action_start_join">Merge Parts</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_clear_queue">Clear Queue</string>
+    <string name="notification_channel_name">File Transfer &amp; Splitting</string>
+    <string name="notification_channel_desc">Shows live progress while splitting or merging large FAT32 files</string>
+</resources>
